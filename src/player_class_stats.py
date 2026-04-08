@@ -22,7 +22,8 @@ from bs4 import BeautifulSoup, Comment
 from constants import TOURNAMENT_YEARS
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; research/academic project)"}
-REQUEST_DELAY = 4  # seconds between requests
+REQUEST_DELAY = 12  # seconds between requests — sports-reference rate-limits hard from CI IPs
+MAX_RETRIES = 4     # retries on 429 with exponential backoff
 
 OUTPUT_PATH = Path("data/raw/player_class_stats.csv")
 
@@ -86,12 +87,15 @@ def _parse_team_page(html: str, year: int, team_id: str) -> dict | None:
                 pass
         return None
 
-    class_col = col("class") or col("yr") or col("class_")
-    mp_col = col("mp")          # minutes per game
-    g_col = col("g")            # games played
-    pts_col = col("pts")        # points per game
+    # sports-reference uses data-stat="class_" (with trailing underscore)
+    class_col = col("class_") or col("class") or col("yr")
+    mp_col    = col("mp")    # minutes per game
+    g_col     = col("g")     # games played
+    pts_col   = col("pts")   # points per game
 
     if class_col is None:
+        # Print headers so we can debug if this keeps failing
+        print(f"    [debug] no class col found. headers={headers[:15]}")
         return None
 
     # We need either (mp + g) to get total minutes, or just relative shares
@@ -159,18 +163,25 @@ def fetch_team_stats(
     year: int,
     session: requests.Session,
 ) -> dict | None:
-    # Sports-reference added /men/ to school URLs; try new format first.
-    for url in [
+    urls = [
         f"https://www.sports-reference.com/cbb/schools/{team_id}/men/{year}.html",
         f"https://www.sports-reference.com/cbb/schools/{team_id}/{year}.html",
-    ]:
-        resp = session.get(url, headers=HEADERS, timeout=30, allow_redirects=True)
-        if resp.status_code == 404:
-            continue
-        resp.raise_for_status()
-        result = _parse_team_page(resp.text, year, team_id)
-        if result:
-            return result
+    ]
+    for url in urls:
+        for attempt in range(MAX_RETRIES):
+            resp = session.get(url, headers=HEADERS, timeout=30, allow_redirects=True)
+            if resp.status_code == 404:
+                break  # try next URL
+            if resp.status_code == 429:
+                wait = 60 * (2 ** attempt)  # 60s, 120s, 240s, 480s
+                print(f"    429 rate-limited — waiting {wait}s...")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            result = _parse_team_page(resp.text, year, team_id)
+            if result:
+                return result
+            break  # parsed OK but no data — try next URL
     return None
 
 
