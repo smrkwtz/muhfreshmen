@@ -2,6 +2,9 @@
 data/raw/
 data/processed/
 
+# Manual exports are intentionally committed - do NOT ignore
+!data/manual/
+
 # Python
 __pycache__/
 *.pyc

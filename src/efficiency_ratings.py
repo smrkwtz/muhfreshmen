@@ -158,17 +158,91 @@ def fetch_ratings_for_year(year: int, session: requests.Session) -> list[dict]:
     return []
 
 
+BARTTORVIK_DIR = Path("data/manual/barttorvik")
+
+
+def load_barttorvik_exports(
+    data_dir: Path = BARTTORVIK_DIR,
+    years: list[int] = TOURNAMENT_YEARS,
+) -> pd.DataFrame:
+    """
+    Load manually exported Barttorvik CSVs from data/manual/barttorvik/.
+    Each file should be named barttorvik_YYYY.csv and exported with the
+    end-date filter set to the day before the tournament (see README.txt).
+
+    Barttorvik CSV columns (typical export):
+      Team, Conf, Rec, AdjOE, AdjDE, Barthag, EFG%, EFGD%, TOR, TORD,
+      ORB, DRB, FTR, FTRD, 2PTM%, 2PTMD%, 3PTM%, 3PTMD%, AdjT, WAB
+    """
+    frames = []
+    for year in years:
+        path = data_dir / f"barttorvik_{year}.csv"
+        if not path.exists():
+            continue
+        df = pd.read_csv(path)
+        df.columns = [c.strip() for c in df.columns]
+
+        # Normalise column names — Barttorvik export headers are consistent
+        # but may have slight variations
+        rename = {}
+        for col in df.columns:
+            low = col.lower().strip()
+            if low in ("team", "team name"):
+                rename[col] = "team"
+            elif low in ("adjoe", "adj oe", "adjo", "adj_oe"):
+                rename[col] = "ORtg"
+            elif low in ("adjde", "adj de", "adjd", "adj_de"):
+                rename[col] = "DRtg"
+            elif low in ("adjt", "adj t", "adj_t", "tempo"):
+                rename[col] = "Pace"
+        df = df.rename(columns=rename)
+        df["year"] = year
+
+        required = {"team", "ORtg", "DRtg"}
+        if not required.issubset(df.columns):
+            print(f"  [warn] {path.name} missing columns. Found: {list(df.columns)}")
+            continue
+
+        df["netRtg"] = df["ORtg"] - df["DRtg"]
+        keep = ["year", "team", "ORtg", "DRtg", "netRtg"]
+        if "Pace" in df.columns:
+            keep.append("Pace")
+        frames.append(df[keep])
+
+    if not frames:
+        return pd.DataFrame()
+
+    result = pd.concat(frames, ignore_index=True)
+    print(f"Loaded {len(result)} team-seasons from {len(frames)} Barttorvik export files")
+    return result
+
+
 def collect_all_efficiency_ratings(
     years: list[int] = TOURNAMENT_YEARS,
     output_path: Path = OUTPUT_PATH,
 ) -> pd.DataFrame:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    all_rows = []
+    # Prefer manually exported Barttorvik data (better quality — opponent-adjusted)
+    bart_df = load_barttorvik_exports(years=years)
+    if not bart_df.empty:
+        years_covered = set(bart_df["year"].unique())
+        missing_years = [y for y in years if y not in years_covered]
+        if missing_years:
+            print(f"Barttorvik exports missing for {missing_years} — scraping sports-reference for those years")
+        else:
+            bart_df.to_csv(output_path, index=False)
+            print(f"Saved {len(bart_df)} team-seasons (Barttorvik exports) → {output_path}")
+            return bart_df
+    else:
+        missing_years = list(years)
+
+    # Fall back to scraping sports-reference for years without Barttorvik exports
+    all_rows = list(bart_df.to_dict("records")) if not bart_df.empty else []
     session = requests.Session()
 
-    for year in years:
-        print(f"Fetching {year} efficiency ratings...", end=" ", flush=True)
+    for year in missing_years:
+        print(f"Fetching {year} efficiency ratings (sports-reference)...", end=" ", flush=True)
         try:
             rows = fetch_ratings_for_year(year, session)
             all_rows.extend(rows)
