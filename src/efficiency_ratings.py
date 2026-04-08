@@ -20,7 +20,6 @@ from pathlib import Path
 
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
 
 from constants import TOURNAMENT_START_DATES, TOURNAMENT_YEARS
 
@@ -75,73 +74,92 @@ def _build_barttorvik_url(year: int) -> str:
     return f"https://barttorvik.com/trank.php?{params}#"
 
 
-def _parse_barttorvik_table(html: str, year: int) -> list[dict]:
-    """Parse the main ratings table from a Barttorvik trank.php page."""
-    soup = BeautifulSoup(html, "lxml")
+def _build_barttorvik_json_url(year: int) -> str:
+    """
+    Barttorvik loads its ratings table from a JSON endpoint, not from the
+    HTML of trank.php (which is JS-rendered). The getteams.php endpoint
+    accepts the same date-range parameters and returns a raw JavaScript array.
+    """
+    end_date = TOURNAMENT_START_DATES.get(year)
+    if not end_date:
+        raise ValueError(f"No tournament start date defined for {year}")
+    season_start = f"{year - 1}1101"
+    params = (
+        f"year={year}"
+        f"&conf=All"
+        f"&state=All"
+        f"&begin={season_start}"
+        f"&end={end_date}"
+        f"&top=0"
+        f"&type=All"
+        f"&links=y"
+        f"&sortby="
+        f"&mingames=0"
+    )
+    return f"https://barttorvik.com/getteams.php?{params}"
 
-    # The ratings are in a <table id="t-rank-table"> or similar
-    table = soup.find("table", id=re.compile(r"t.rank", re.I))
-    if table is None:
-        # Fallback: find the first large table on the page
-        tables = soup.find_all("table")
-        table = max(tables, key=lambda t: len(t.find_all("tr")), default=None)
-    if table is None:
+
+def _parse_barttorvik_json(data: list, year: int) -> list[dict]:
+    """
+    Parse the array returned by getteams.php.
+
+    Each element is an array. The known column layout (may shift slightly):
+      [0]  rank
+      [1]  team name
+      [2]  conference
+      [3]  adjOE rank
+      [4]  adjOE  ← Adjusted Offensive Efficiency
+      [5]  adjDE rank
+      [6]  adjDE  ← Adjusted Defensive Efficiency
+      [7]  barthag (Pythagorean win %)
+      [8]  record (string, e.g. "32-5")
+      [9]  adjT rank
+      [10] adjT   ← Adjusted Tempo
+      ...
+
+    We identify columns dynamically by scanning the first row for floats in
+    the expected ranges (adjOE ~100-130, adjDE ~85-115, adjT ~60-80), which
+    is more robust than relying on fixed indices.
+    """
+    if not data:
         return []
 
-    # Parse header row to map column positions
-    header_row = table.find("thead")
-    if header_row is None:
-        header_row = table.find("tr")
-    headers = [th.get_text(strip=True).lower() for th in header_row.find_all(["th", "td"])]
+    # Detect column positions from the first data row
+    first = data[0]
 
-    # Find column indices we care about
-    def col_idx(name: str) -> int | None:
-        try:
-            return headers.index(name)
-        except ValueError:
-            return None
+    def find_col(lo, hi, exclude=()) -> int | None:
+        for i, v in enumerate(first):
+            if i in exclude:
+                continue
+            try:
+                f = float(v)
+                if lo <= f <= hi:
+                    return i
+            except (TypeError, ValueError):
+                pass
+        return None
 
-    team_col = col_idx("team")
-    adjo_col = col_idx("adjoe")
-    adjd_col = col_idx("adjde")
-    adjt_col = col_idx("adjt")
+    team_col = 1   # always position 1
+    adjo_col = find_col(85, 145)
+    adjd_col = find_col(85, 130, exclude={adjo_col} if adjo_col is not None else set())
+    adjt_col = find_col(55, 85,  exclude={adjo_col, adjd_col} - {None})
 
-    # adjEM is not always a direct column; compute as adjO - adjD
     rows = []
-    for tr in table.find("tbody").find_all("tr"):
-        cells = tr.find_all(["td", "th"])
-        if len(cells) < 3:
-            continue
-
-        def cell(idx):
-            if idx is None or idx >= len(cells):
-                return None
-            return cells[idx].get_text(strip=True)
-
-        team_name = cell(team_col)
-        if not team_name:
-            continue
-
-        # Extract school id from the team link if present
-        team_a = cells[team_col].find("a") if team_col is not None else None
-        school_id = None
-        if team_a and team_a.get("href"):
-            m = re.search(r"team=([^&]+)", team_a["href"])
-            if m:
-                school_id = m.group(1)
-
+    for entry in data:
         try:
-            adjo = float(cell(adjo_col)) if adjo_col is not None else None
-            adjd = float(cell(adjd_col)) if adjd_col is not None else None
-            adjt = float(cell(adjt_col)) if adjt_col is not None else None
-            adjEM = round(adjo - adjd, 2) if (adjo is not None and adjd is not None) else None
-        except (ValueError, TypeError):
+            team = str(entry[team_col]).strip()
+            if not team:
+                continue
+            adjo = float(entry[adjo_col]) if adjo_col is not None else None
+            adjd = float(entry[adjd_col]) if adjd_col is not None else None
+            adjt = float(entry[adjt_col]) if adjt_col is not None else None
+            adjEM = round(adjo - adjd, 2) if (adjo and adjd) else None
+        except (IndexError, TypeError, ValueError):
             continue
 
         rows.append({
             "year": year,
-            "team": team_name,
-            "team_id_bart": school_id,
+            "team": team,
             "adjO": adjo,
             "adjD": adjd,
             "adjT": adjt,
@@ -152,10 +170,28 @@ def _parse_barttorvik_table(html: str, year: int) -> list[dict]:
 
 
 def fetch_ratings_for_year(year: int, session: requests.Session) -> list[dict]:
-    url = _build_barttorvik_url(year)
+    import json
+
+    url = _build_barttorvik_json_url(year)
     resp = session.get(url, headers=HEADERS, timeout=30)
     resp.raise_for_status()
-    return _parse_barttorvik_table(resp.text, year)
+
+    # Response is either JSON or a JS array literal — strip any variable prefix
+    text = resp.text.strip()
+    if text.startswith("var ") or text.startswith("let ") or text.startswith("const "):
+        text = text.split("=", 1)[1].strip().rstrip(";")
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        print(f"  [warn] JSON parse failed: {e}. First 200 chars: {text[:200]}")
+        return []
+
+    if not isinstance(data, list):
+        print(f"  [warn] Unexpected response type: {type(data)}")
+        return []
+
+    return _parse_barttorvik_json(data, year)
 
 
 def collect_all_efficiency_ratings(
