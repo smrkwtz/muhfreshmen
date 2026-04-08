@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 
 from constants import ROUND_ORDER, TOURNAMENT_YEARS
 
@@ -55,7 +55,50 @@ def _extract_school_id(href: str) -> str | None:
     return m.group(1) if m else None
 
 
-def scrape_tournament_year(year: int, session: requests.Session) -> list[dict]:
+def _find_bracket(soup: BeautifulSoup) -> BeautifulSoup | None:
+    """
+    Find the bracket div in both the visible DOM and inside HTML comments.
+    Sports-reference frequently wraps content in <!-- --> comments to
+    defer rendering to JavaScript; we need to check both locations.
+    """
+    # 1. Try visible DOM first
+    bracket = soup.find("div", id="bracket")
+    if bracket:
+        return bracket
+
+    # 2. Search inside HTML comments
+    for comment in soup.find_all(string=lambda t: isinstance(t, Comment)):
+        if "bracket" not in comment:
+            continue
+        inner = BeautifulSoup(comment, "lxml")
+        bracket = inner.find("div", id="bracket")
+        if bracket:
+            return bracket
+
+    return None
+
+
+def _debug_page_structure(soup: BeautifulSoup, year: int) -> None:
+    """Print structural info to help diagnose parse failures."""
+    print(f"\n  --- DEBUG for {year} ---")
+
+    # List all div ids
+    ids = [t.get("id") for t in soup.find_all("div") if t.get("id")]
+    print(f"  Div IDs on page: {ids[:30]}")
+
+    # List divs whose id or class contains "bracket"
+    for tag in soup.find_all("div"):
+        classes = " ".join(tag.get("class") or [])
+        id_ = tag.get("id", "")
+        if "bracket" in id_.lower() or "bracket" in classes.lower():
+            print(f"  Bracket-related div: id='{id_}' class='{classes}'")
+
+    # Print first 2000 chars of raw HTML for manual inspection
+    print(f"  First 1000 chars of HTML:\n{str(soup)[:1000]}")
+    print(f"  --- END DEBUG ---\n")
+
+
+def scrape_tournament_year(year: int, session: requests.Session, debug: bool = False) -> list[dict]:
     """Parse one tournament bracket page and return a list of game dicts."""
     url = f"https://www.sports-reference.com/cbb/postseason/{year}-ncaa.html"
     resp = session.get(url, headers=HEADERS, timeout=30)
@@ -64,9 +107,11 @@ def scrape_tournament_year(year: int, session: requests.Session) -> list[dict]:
     soup = BeautifulSoup(resp.text, "lxml")
     games = []
 
-    bracket = soup.find("div", id="bracket")
+    bracket = _find_bracket(soup)
     if not bracket:
-        print(f"  [warn] No #bracket div found for {year} - page structure may have changed")
+        print(f"  [warn] No #bracket div found for {year}")
+        if debug:
+            _debug_page_structure(soup, year)
         return games
 
     # Each <div class="round"> holds one round's worth of games.
@@ -137,6 +182,7 @@ def scrape_tournament_year(year: int, session: requests.Session) -> list[dict]:
 def collect_all_tournament_results(
     years: list[int] = TOURNAMENT_YEARS,
     output_path: Path = OUTPUT_PATH,
+    debug: bool = False,
 ) -> pd.DataFrame:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -146,7 +192,7 @@ def collect_all_tournament_results(
     for year in years:
         print(f"Scraping {year} tournament...", end=" ", flush=True)
         try:
-            games = scrape_tournament_year(year, session)
+            games = scrape_tournament_year(year, session, debug=debug)
             all_games.extend(games)
             print(f"{len(games)} games")
         except requests.HTTPError as e:
@@ -155,6 +201,13 @@ def collect_all_tournament_results(
             print(f"ERROR: {e}")
         time.sleep(REQUEST_DELAY)
 
+    if not all_games:
+        raise RuntimeError(
+            "No tournament games were scraped. The page structure may have changed "
+            "or sports-reference is blocking the request. Re-run with debug=True "
+            "(set DEBUG_SCRAPE=1 env var) to inspect the HTML."
+        )
+
     df = pd.DataFrame(all_games)
     df.to_csv(output_path, index=False)
     print(f"\nSaved {len(df)} total games → {output_path}")
@@ -162,4 +215,6 @@ def collect_all_tournament_results(
 
 
 if __name__ == "__main__":
-    collect_all_tournament_results()
+    import os
+    debug = os.environ.get("DEBUG_SCRAPE", "0") == "1"
+    collect_all_tournament_results(debug=debug)
