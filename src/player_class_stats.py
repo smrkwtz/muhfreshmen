@@ -72,6 +72,9 @@ def _parse_team_page(html: str, year: int, team_id: str) -> dict | None:
 
     table = _get_per_game_table(soup)
     if table is None:
+        # Show all table IDs found to aid debugging
+        all_ids = [t.get("id", "<no-id>") for t in soup.find_all("table")]
+        print(f"    [debug] per_game table not found. DOM table ids={all_ids[:10]}")
         return None
 
     # Map header names → column indices
@@ -142,6 +145,7 @@ def _parse_team_page(html: str, year: int, team_id: str) -> dict | None:
             n_freshmen += 1
 
     if total_min == 0 and total_pts == 0:
+        print(f"    [debug] table found, class_col={class_col}, but all rows filtered out (no matching class labels or zero values)")
         return None
 
     return {
@@ -158,10 +162,27 @@ def _parse_team_page(html: str, year: int, team_id: str) -> dict | None:
     }
 
 
+def _diagnose_response(resp, label: str = "") -> None:
+    """Print diagnostic info about an unexpected response body (bot page, etc.)."""
+    body = resp.text
+    snippet = body[:400].replace("\n", " ").strip()
+    table_count_dom = body.count('<table')
+    comment_count = body.count('<!--')
+    has_cf = "cloudflare" in body.lower() or "cf-ray" in resp.headers.get("server", "").lower()
+    has_sref = "sports-reference" in body.lower() or "sr-nav" in body.lower()
+    print(
+        f"    [diag{' ' + label if label else ''}] "
+        f"status={resp.status_code} tables={table_count_dom} "
+        f"comments={comment_count} cloudflare={has_cf} sref={has_sref}"
+    )
+    print(f"    [diag snippet] {snippet[:300]}")
+
+
 def fetch_team_stats(
     team_id: str,
     year: int,
     session: requests.Session,
+    verbose: bool = False,
 ) -> dict | None:
     urls = [
         f"https://www.sports-reference.com/cbb/schools/{team_id}/men/{year}.html",
@@ -177,11 +198,15 @@ def fetch_team_stats(
                 print(f"    429 rate-limited — waiting {wait}s...")
                 time.sleep(wait)
                 continue
-            resp.raise_for_status()
+            if resp.status_code not in (200,):
+                print(f"    HTTP {resp.status_code} from {url}")
+                resp.raise_for_status()
             result = _parse_team_page(resp.text, year, team_id)
             if result:
                 return result
-            break  # parsed OK but no data — try next URL
+            # Parse returned None — log diagnostics so we can see what arrived
+            _diagnose_response(resp, label=f"{team_id}/{year}")
+            break  # try next URL
     return None
 
 
