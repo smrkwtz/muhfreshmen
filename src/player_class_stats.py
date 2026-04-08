@@ -38,22 +38,26 @@ def _get_per_game_table(soup: BeautifulSoup) -> BeautifulSoup | None:
     sports-reference sometimes hides tables inside HTML comments (due to ad
     injection); this function checks both visible DOM and commented-out HTML.
     """
-    table = soup.find("table", id="per_game")
-    if table:
-        return table
+    # Try each known table ID (sports-reference renamed per_game → players_per_game)
+    for tid in ("players_per_game", "per_game", "season-total_per_game"):
+        table = soup.find("table", id=tid)
+        if table:
+            return table
 
-    # Check inside HTML comments
+    # Check inside HTML comments for any of the known IDs
     for comment in soup.find_all(string=lambda t: isinstance(t, Comment)):
-        if "per_game" in comment:
-            inner = BeautifulSoup(comment, "lxml")
-            table = inner.find("table", id="per_game")
+        if "per_game" not in comment:
+            continue
+        inner = BeautifulSoup(comment, "lxml")
+        for tid in ("players_per_game", "per_game", "season-total_per_game"):
+            table = inner.find("table", id=tid)
             if table:
                 return table
 
-    # Fallback: any table containing a "Class" column
+    # Fallback: any table with a class/year column and per-game stats
     for tbl in soup.find_all("table"):
-        headers = [th.get_text(strip=True).lower() for th in tbl.find_all("th")]
-        if "class" in headers and any(h in headers for h in ("mp", "g", "pts")):
+        stats = {th.get("data-stat", "") for th in tbl.find_all("th")}
+        if "class_" in stats and "mp" in stats and "pts" in stats:
             return tbl
 
     return None

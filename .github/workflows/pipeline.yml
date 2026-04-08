@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       skip_step3:
-        description: "Skip step 3 (player class stats)? Set to 'true' if CSV already committed."
+        description: "Skip step 3? Set 'true' if player_class_stats.csv is already committed/cached."
         required: false
         default: "false"
 
@@ -26,67 +26,72 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # ── Step 1: tournament results (cache so we don't re-scrape ~4 min every run) ──
+      - name: Restore step 1 cache
+        id: cache-step1
+        uses: actions/cache/restore@v4
+        with:
+          path: data/raw/tournament_results.csv
+          key: tournament-results-v1
+
       - name: "Step 1: Scrape tournament results (~4 min)"
+        if: steps.cache-step1.outputs.cache-hit != 'true'
         run: python run_pipeline.py --step 1
 
-      - name: "Step 2: Load efficiency ratings (Barttorvik exports)"
+      - name: Save step 1 cache
+        if: steps.cache-step1.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: data/raw/tournament_results.csv
+          key: tournament-results-v1
+
+      # ── Step 2: efficiency ratings (reads committed Barttorvik CSVs — instant) ──
+      - name: "Step 2: Load efficiency ratings"
         run: python run_pipeline.py --step 2
 
+      # ── Diagnostic: confirm page structure (can be removed once step 3 is working) ──
       - name: "Diagnose: probe sports-reference page structure"
         run: |
           python - <<'EOF'
           import requests
           from bs4 import BeautifulSoup, Comment
-
           ua = "Mozilla/5.0 (compatible; research/academic project)"
           url = "https://www.sports-reference.com/cbb/schools/duke/men/2024.html"
-          try:
-              resp = requests.get(url, headers={"User-Agent": ua}, timeout=30)
-          except Exception as e:
-              print(f"Request failed: {e}")
-              raise SystemExit(0)
-
+          resp = requests.get(url, headers={"User-Agent": ua}, timeout=30)
           print(f"Status: {resp.status_code}")
-          body = resp.text
-          print(f"Body length: {len(body)}")
-          print(f"Has 'cloudflare': {'cloudflare' in body.lower()}")
-          print(f"Has 'sports-reference': {'sports-reference' in body.lower()}")
-          print(f"DOM <table> count: {body.count('<table')}")
-          print(f"HTML comment count: {body.count('<!--')}")
-          print(f"First 600 chars: {body[:600]!r}")
-
-          soup = BeautifulSoup(body, "lxml")
+          soup = BeautifulSoup(resp.text, "lxml")
           dom_ids = [t.get("id", "<none>") for t in soup.find_all("table")]
-          print(f"\nDOM table IDs: {dom_ids}")
-
-          print("\nComment tables:")
-          for comment in soup.find_all(string=lambda t: isinstance(t, Comment)):
-              inner = BeautifulSoup(comment, "lxml")
-              for t in inner.find_all("table"):
-                  tid = t.get("id", "?")
-                  thead = t.find("thead")
-                  hs = []
-                  if thead:
-                      hs = [th.get("data-stat", th.get_text(strip=True)) for th in thead.find_all("th")][:15]
-                  print(f"  '{tid}': {hs}")
+          print(f"DOM table IDs: {dom_ids}")
+          # Check the players_per_game table headers specifically
+          tbl = soup.find("table", id="players_per_game")
+          if tbl:
+              thead = tbl.find("thead")
+              if thead:
+                  hs = [th.get("data-stat", th.get_text(strip=True)) for th in thead.find_all("th")]
+                  print(f"players_per_game headers: {hs}")
+              # Print first 2 data rows to confirm class_ column presence
+              rows = tbl.find("tbody").find_all("tr")[:2]
+              for r in rows:
+                  cells = {td.get("data-stat"): td.get_text(strip=True) for td in r.find_all(["td","th"])}
+                  print(f"  row: {dict(list(cells.items())[:8])}")
+          else:
+              print("players_per_game NOT found in DOM")
           EOF
 
+      # ── Step 3: player class stats ──
       - name: Check if player_class_stats.csv already committed
         id: check-csv
         run: |
-          if [ -f "data/raw/player_class_stats.csv" ]; then
-            lines=$(wc -l < data/raw/player_class_stats.csv)
-            echo "csv_exists=true" >> $GITHUB_OUTPUT
-            echo "csv_lines=$lines" >> $GITHUB_OUTPUT
-            echo "Found committed player_class_stats.csv with $lines lines"
+          if [ -f "data/raw/player_class_stats.csv" ] && [ $(wc -l < data/raw/player_class_stats.csv) -gt 1 ]; then
+            echo "csv_ready=true" >> $GITHUB_OUTPUT
+            echo "Committed CSV found: $(wc -l < data/raw/player_class_stats.csv) lines"
           else
-            echo "csv_exists=false" >> $GITHUB_OUTPUT
-            echo "No committed player_class_stats.csv found"
+            echo "csv_ready=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Restore step 3 cache (player class stats)
+      - name: Restore step 3 cache
         id: cache-step3
-        if: steps.check-csv.outputs.csv_exists != 'true'
+        if: steps.check-csv.outputs.csv_ready != 'true'
         uses: actions/cache/restore@v4
         with:
           path: data/raw/player_class_stats.csv
@@ -95,7 +100,7 @@ jobs:
       - name: "Step 3: Fetch player class stats (~2 hours)"
         if: |
           inputs.skip_step3 != 'true' &&
-          steps.check-csv.outputs.csv_exists != 'true' &&
+          steps.check-csv.outputs.csv_ready != 'true' &&
           steps.cache-step3.outputs.cache-hit != 'true'
         run: python run_pipeline.py --step 3 --force
 
