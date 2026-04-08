@@ -1,12 +1,17 @@
 name: Run Freshman Reliance Pipeline
 
 on:
-  workflow_dispatch:   # manual trigger from the Actions tab
+  workflow_dispatch:
+    inputs:
+      from_step:
+        description: "Start from step (1-5). Use to resume after a partial run."
+        required: false
+        default: "1"
 
 jobs:
   pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 360   # 6-hour cap; step 3 alone needs ~2 hours
+    timeout-minutes: 360
 
     steps:
       - uses: actions/checkout@v4
@@ -21,10 +26,30 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Upload after each slow step so partial results are preserved
-      # even if a later step fails.
+      # Restore any previously uploaded artifacts so cached steps are skipped.
+      - name: Restore tournament results (if available)
+        uses: actions/download-artifact@v4
+        with:
+          name: tournament-results
+          path: data/raw/
+        continue-on-error: true
+
+      - name: Restore efficiency ratings (if available)
+        uses: actions/download-artifact@v4
+        with:
+          name: efficiency-ratings
+          path: data/raw/
+        continue-on-error: true
+
+      - name: Restore player class stats (if available)
+        uses: actions/download-artifact@v4
+        with:
+          name: player-class-stats
+          path: data/raw/
+        continue-on-error: true
 
       - name: "Step 1: Scrape tournament results"
+        if: ${{ inputs.from_step <= '1' }}
         run: python run_pipeline.py --step 1
 
       - name: Upload tournament results
@@ -33,8 +58,10 @@ jobs:
         with:
           name: tournament-results
           path: data/raw/tournament_results.csv
+          overwrite: true
 
       - name: "Step 2: Fetch efficiency ratings (Barttorvik)"
+        if: ${{ inputs.from_step <= '2' }}
         run: python run_pipeline.py --step 2
 
       - name: Upload efficiency ratings
@@ -43,8 +70,10 @@ jobs:
         with:
           name: efficiency-ratings
           path: data/raw/efficiency_ratings.csv
+          overwrite: true
 
       - name: "Step 3: Fetch player class stats (~2 hours)"
+        if: ${{ inputs.from_step <= '3' }}
         run: python run_pipeline.py --step 3
 
       - name: Upload player class stats
@@ -53,6 +82,7 @@ jobs:
         with:
           name: player-class-stats
           path: data/raw/player_class_stats.csv
+          overwrite: true
 
       - name: "Step 4: Build merged analysis dataset"
         run: python run_pipeline.py --step 4
@@ -68,4 +98,5 @@ jobs:
           path: |
             data/processed/analysis_dataset.csv
             analysis/figures/
+          overwrite: true
           retention-days: 90
