@@ -11,7 +11,6 @@ Output columns:
   fr_min_raw, fr_pts_raw, total_min, total_pts, n_fr_players
 """
 
-import re
 import time
 from pathlib import Path
 
@@ -32,124 +31,131 @@ FRESHMAN_LABELS = {"fr", "freshman"}
 ALL_CLASS_LABELS = {"fr", "so", "jr", "sr", "freshman", "sophomore", "junior", "senior"}
 
 
-def _get_per_game_table(soup: BeautifulSoup) -> BeautifulSoup | None:
-    """
-    Find the per-game stats table on a team season page.
-    sports-reference sometimes hides tables inside HTML comments (due to ad
-    injection); this function checks both visible DOM and commented-out HTML.
-    """
-    # Try each known table ID (sports-reference renamed per_game → players_per_game)
-    for tid in ("players_per_game", "per_game", "season-total_per_game"):
-        table = soup.find("table", id=tid)
-        if table:
-            return table
+def _idx(headers: list[str], names: tuple) -> int | None:
+    """Return the first matching index from a list of candidate data-stat names."""
+    for name in names:
+        try:
+            return headers.index(name)
+        except ValueError:
+            pass
+    return None
 
-    # Check inside HTML comments for any of the known IDs
+
+def _cell(cells: list, idx: int | None) -> str:
+    if idx is None or idx >= len(cells):
+        return ""
+    return cells[idx].get_text(strip=True)
+
+
+def _table_headers(table) -> list[str]:
+    return [c.get("data-stat", "") for c in table.find("thead").find_all(["th", "td"])]
+
+
+def _find_table(soup: BeautifulSoup, *ids: str):
+    """Find a table by ID, checking DOM first then HTML comments."""
+    for tid in ids:
+        tbl = soup.find("table", id=tid)
+        if tbl:
+            return tbl
     for comment in soup.find_all(string=lambda t: isinstance(t, Comment)):
-        if "per_game" not in comment:
+        if not any(tid in comment for tid in ids):
             continue
         inner = BeautifulSoup(comment, "lxml")
-        for tid in ("players_per_game", "per_game", "season-total_per_game"):
-            table = inner.find("table", id=tid)
-            if table:
-                return table
-
-    # Fallback: any table with a class/year column and per-game stats
-    for tbl in soup.find_all("table"):
-        stats = {th.get("data-stat", "") for th in tbl.find_all("th")}
-        if "class_" in stats and "mp" in stats and "pts" in stats:
-            return tbl
-
+        for tid in ids:
+            tbl = inner.find("table", id=tid)
+            if tbl:
+                return tbl
     return None
 
 
 def _parse_team_page(html: str, year: int, team_id: str) -> dict | None:
     """
-    Parse a team season page and return the freshman-reliance metrics dict,
-    or None if the page could not be parsed.
+    Parse a team season page and return the freshman-reliance metrics dict.
+
+    Sports-reference structure (current):
+      - `roster` table (DOM): has player name + class year (FR/SO/JR/SR)
+      - `players_per_game` table (DOM): has player name + games + mp_per_g + pts_per_g
+    We join them on player name to combine class and stats.
+    Older page formats may still have class_ directly in the per-game table.
     """
     soup = BeautifulSoup(html, "lxml")
 
-    # Extract team name from page title
     title = soup.find("h1", {"itemprop": "name"})
     team_name = title.get_text(strip=True) if title else team_id
 
-    table = _get_per_game_table(soup)
-    if table is None:
-        # Show all table IDs found to aid debugging
-        all_ids = [t.get("id", "<no-id>") for t in soup.find_all("table")]
-        print(f"    [debug] per_game table not found. DOM table ids={all_ids[:10]}")
+    # ── Step 1: build player → class year map from roster table ─────────────
+    class_map: dict[str, str] = {}
+    roster_tbl = _find_table(soup, "roster")
+    if roster_tbl:
+        h = _table_headers(roster_tbl)
+        name_col = _idx(h, ("player", "name_display"))
+        cls_col  = _idx(h, ("class_", "class", "yr"))
+        if name_col is not None and cls_col is not None:
+            for row in roster_tbl.find("tbody").find_all("tr"):
+                cells = row.find_all(["td", "th"])
+                name = _cell(cells, name_col).strip()
+                cls  = _cell(cells, cls_col).lower().strip()
+                if name and cls:
+                    class_map[name] = cls
+
+    # ── Step 2: get per-game stats from players_per_game ────────────────────
+    stats_tbl = _find_table(
+        soup,
+        "players_per_game", "per_game", "season-total_per_game",
+    )
+    if stats_tbl is None:
+        ids = [t.get("id", "?") for t in soup.find_all("table")]
+        print(f"    [debug] stats table not found. DOM ids={ids[:12]}")
         return None
 
-    # Map header names → column indices
-    header_cells = table.find("thead").find_all(["th", "td"])
-    headers = [c.get("data-stat", c.get_text(strip=True)).lower() for c in header_cells]
+    h = _table_headers(stats_tbl)
+    s_name  = _idx(h, ("name_display", "player"))
+    s_games = _idx(h, ("games", "g"))
+    s_mp    = _idx(h, ("mp_per_g", "mp"))
+    s_pts   = _idx(h, ("pts_per_g", "pts"))
+    # Older formats may still carry class_ directly in the stats table
+    s_cls   = _idx(h, ("class_", "class", "yr"))
 
-    def col(name: str) -> int | None:
-        # Try data-stat first, then text
-        for attr in (name, name.replace("_", "")):
-            try:
-                return headers.index(attr)
-            except ValueError:
-                pass
+    if s_games is None or s_mp is None or s_pts is None:
+        print(f"    [debug] missing stat cols in {stats_tbl.get('id')}. headers={h[:20]}")
         return None
 
-    # sports-reference uses data-stat="class_" (with trailing underscore)
-    class_col = col("class_") or col("class") or col("yr")
-    mp_col    = col("mp")    # minutes per game
-    g_col     = col("g")     # games played
-    pts_col   = col("pts")   # points per game
+    total_min = fr_min = total_pts = fr_pts = 0.0
+    n_fr = 0
 
-    if class_col is None:
-        # Print headers so we can debug if this keeps failing
-        print(f"    [debug] no class col found. headers={headers[:15]}")
-        return None
-
-    # We need either (mp + g) to get total minutes, or just relative shares
-    total_min = 0.0
-    fr_min = 0.0
-    total_pts = 0.0
-    fr_pts = 0.0
-    n_freshmen = 0
-
-    for row in table.find("tbody").find_all("tr"):
-        # Skip header/separator rows
+    for row in stats_tbl.find("tbody").find_all("tr"):
         if "thead" in (row.get("class") or []):
             continue
         cells = row.find_all(["td", "th"])
         if not cells:
             continue
 
-        def val(idx):
-            if idx is None or idx >= len(cells):
-                return ""
-            return cells[idx].get_text(strip=True)
+        # Class year: direct column (old format) or roster lookup (new format)
+        if s_cls is not None:
+            cls = _cell(cells, s_cls).lower().strip()
+        else:
+            player_name = _cell(cells, s_name).strip() if s_name is not None else ""
+            cls = class_map.get(player_name, "").lower().strip()
 
-        class_val = val(class_col).lower().strip()
-        if not class_val or class_val not in ALL_CLASS_LABELS:
+        if not cls or cls not in ALL_CLASS_LABELS:
             continue
 
         try:
-            g = float(val(g_col)) if g_col is not None else 0
-            mp = float(val(mp_col)) if mp_col is not None else 0
-            pts = float(val(pts_col)) if pts_col is not None else 0
+            g   = float(_cell(cells, s_games) or 0)
+            mp  = float(_cell(cells, s_mp)    or 0)
+            pts = float(_cell(cells, s_pts)   or 0)
         except ValueError:
             continue
 
-        # Total minutes for player across season = MP per game × games
-        player_min = mp * g
-        player_pts = pts * g
-
-        total_min += player_min
-        total_pts += player_pts
-
-        if class_val in FRESHMAN_LABELS:
-            fr_min += player_min
-            fr_pts += player_pts
-            n_freshmen += 1
+        total_min += mp * g
+        total_pts += pts * g
+        if cls in FRESHMAN_LABELS:
+            fr_min += mp * g
+            fr_pts += pts * g
+            n_fr += 1
 
     if total_min == 0 and total_pts == 0:
-        print(f"    [debug] table found, class_col={class_col}, but all rows filtered out (no matching class labels or zero values)")
+        print(f"    [debug] no valid rows. roster entries={len(class_map)}, s_cls={s_cls}")
         return None
 
     return {
@@ -162,7 +168,7 @@ def _parse_team_page(html: str, year: int, team_id: str) -> dict | None:
         "total_pts": round(total_pts, 1),
         "fr_min_share": round(fr_min / total_min, 4) if total_min > 0 else None,
         "fr_pts_share": round(fr_pts / total_pts, 4) if total_pts > 0 else None,
-        "n_fr_players": n_freshmen,
+        "n_fr_players": n_fr,
     }
 
 
