@@ -30,21 +30,28 @@ KEEP_COLS = {
 def clean_tab(df_raw: pd.DataFrame, year: int) -> pd.DataFrame:
     """
     Clean one year's tab.
-    - Drop repeated header rows (where Rk == 'Rk')
-    - Drop rank-comparison rows (where Rk is empty or non-numeric)
-    - Keep only the columns we need
+    The Excel copy-paste has 2 preamble rows (D-I averages) before the
+    real header row (Rk, Team, Conf, ...). Find that header row dynamically,
+    promote it, then drop rank-comparison and repeated-header rows.
     """
-    # Rename columns from first row if the DataFrame has no header
-    # (pandas may have read the first data row as header if Excel has no header)
+    # Find the row containing "Rk" in the first column — that's the real header
+    header_idx = None
+    for i, val in enumerate(df_raw.iloc[:, 0]):
+        if str(val).strip() == "Rk":
+            header_idx = i
+            break
 
-    # Ensure column names match what we expect; if first row looks like a header
-    # that pandas missed, promote it.
-    if "Rk" not in df_raw.columns and "Team" not in df_raw.columns:
-        df_raw.columns = df_raw.iloc[0]
-        df_raw = df_raw.iloc[1:].reset_index(drop=True)
+    if header_idx is None:
+        print(f"  [warn] {year}: could not find header row")
+        return pd.DataFrame()
 
-    # Drop rows where Rk is 'Rk' (repeated header rows)
-    df = df_raw[df_raw["Rk"].astype(str).str.strip() != "Rk"].copy()
+    # Promote that row to column names
+    df = df_raw.iloc[header_idx + 1:].copy()
+    df.columns = df_raw.iloc[header_idx].tolist()
+    df = df.reset_index(drop=True)
+
+    # Drop repeated header rows (where Rk == 'Rk')
+    df = df[df["Rk"].astype(str).str.strip() != "Rk"].copy()
 
     # Keep only rows where Rk is a valid integer (drop rank-comparison rows)
     def is_int(val):
@@ -56,36 +63,44 @@ def clean_tab(df_raw: pd.DataFrame, year: int) -> pd.DataFrame:
 
     df = df[df["Rk"].apply(is_int)].copy()
 
-    # Check for required columns
-    missing = [c for c in KEEP_COLS if c not in df.columns]
+    # Check for required columns (case-insensitive fallback)
+    col_map = {str(c).lower(): c for c in df.columns}
+    for needed, lower in [("Team", "team"), ("AdjOE", "adjoe"), ("AdjDE", "adjde")]:
+        if needed not in df.columns and lower in col_map:
+            df = df.rename(columns={col_map[lower]: needed})
+
+    # Handle "Adj T." column — sometimes "Adj T." sometimes "AdjT"
+    if "Adj T." not in df.columns:
+        for variant in ("AdjT", "Adj T", "adj t.", "adjt"):
+            if variant in col_map:
+                df = df.rename(columns={col_map[variant]: "Adj T."})
+                break
+
+    required = {"Team", "AdjOE", "AdjDE"}
+    missing = required - set(df.columns)
     if missing:
-        # Try case-insensitive match
-        col_map = {c.lower(): c for c in df.columns}
-        for needed in list(KEEP_COLS.keys()):
-            if needed not in df.columns:
-                match = col_map.get(needed.lower())
-                if match:
-                    df = df.rename(columns={match: needed})
-                else:
-                    print(f"  [warn] {year}: missing column '{needed}'. Available: {list(df.columns)}")
+        print(f"  [warn] {year}: missing columns {missing}. Available: {list(df.columns)}")
+        return pd.DataFrame()
 
     # Select and rename
-    available = {k: v for k, v in KEEP_COLS.items() if k in df.columns}
-    df = df[list(available.keys())].rename(columns=available)
+    keep = {"Team": "team", "AdjOE": "ORtg", "AdjDE": "DRtg"}
+    if "Adj T." in df.columns:
+        keep["Adj T."] = "Pace"
+    df = df[list(keep.keys())].rename(columns=keep)
 
     # Cast to numeric
     for col in ("ORtg", "DRtg", "Pace"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Drop rows where we couldn't parse the ratings
     df = df.dropna(subset=["ORtg", "DRtg"]).copy()
-
-    # Compute netRtg
     df["netRtg"] = (df["ORtg"] - df["DRtg"]).round(2)
     df["year"] = year
 
-    return df[["year", "team", "ORtg", "DRtg", "Pace", "netRtg"]].reset_index(drop=True)
+    cols = ["year", "team", "ORtg", "DRtg", "netRtg"]
+    if "Pace" in df.columns:
+        cols.insert(4, "Pace")
+    return df[cols].reset_index(drop=True)
 
 
 def main(xlsx_path: str) -> None:
@@ -107,7 +122,7 @@ def main(xlsx_path: str) -> None:
             print(f"Skipping tab '{sheet}' (not a year)")
             continue
 
-        df_raw = xl.parse(sheet, dtype=str, header=0)
+        df_raw = xl.parse(sheet, dtype=str, header=None)
         df_clean = clean_tab(df_raw, year)
 
         out_path = OUTPUT_DIR / f"barttorvik_{year}.csv"
