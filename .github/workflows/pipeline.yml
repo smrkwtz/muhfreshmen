@@ -21,44 +21,44 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Fetch one bracket page and print its structure so we can verify
-      # the HTML parser is matching the right elements before the full run.
-      - name: "Diagnose: inspect 2024 bracket page HTML"
+      # Dump the bracket div HTML so we can inspect the actual structure.
+      - name: "Diagnose: dump bracket div HTML"
         run: |
           python - <<'EOF'
-          import sys, requests
-          sys.path.insert(0, "src")
+          import os, requests
           from bs4 import BeautifulSoup, Comment
 
-          url = "https://www.sports-reference.com/cbb/postseason/2024-ncaa.html"
-          headers = {"User-Agent": "Mozilla/5.0 (compatible; research/academic project)"}
-          resp = requests.get(url, headers=headers, timeout=30)
-          print(f"HTTP status: {resp.status_code}")
-          soup = BeautifulSoup(resp.text, "lxml")
-
-          # Check for bracket in visible DOM
-          bracket = soup.find("div", id="bracket")
-          print(f"#bracket in DOM: {bracket is not None}")
-
-          # Check inside HTML comments
-          for c in soup.find_all(string=lambda t: isinstance(t, Comment)):
-              if "bracket" in c:
-                  inner = BeautifulSoup(c, "lxml")
-                  b = inner.find("div", id="bracket")
-                  print(f"#bracket in comment: {b is not None}")
-                  if b:
-                      rounds = b.find_all("div", class_="round")
-                      print(f"  round divs found: {len(rounds)}")
+          for url in [
+              "https://www.sports-reference.com/cbb/postseason/men/2024-ncaa.html",
+              "https://www.sports-reference.com/cbb/postseason/2024-ncaa.html",
+          ]:
+              resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+              print(f"{url} -> {resp.status_code}")
+              if resp.status_code == 200:
                   break
 
-          # List all div IDs
-          ids = [t["id"] for t in soup.find_all("div") if t.get("id")]
-          print(f"All div IDs: {ids[:40]}")
+          soup = BeautifulSoup(resp.text, "lxml")
 
-          # Print first 2000 chars of raw HTML
-          print("\n--- First 2000 chars ---")
-          print(resp.text[:2000])
+          bracket_divs = soup.find_all("div", id="bracket")
+          print(f"\nNumber of #bracket divs in DOM: {len(bracket_divs)}")
+          for i, div in enumerate(bracket_divs[:2]):
+              print(f"\n--- #bracket[{i}] first 2000 chars ---")
+              print(str(div)[:2000])
+
+          # Save full HTML as artifact for download + manual inspection
+          os.makedirs("diag", exist_ok=True)
+          with open("diag/page_2024.html", "w") as f:
+              f.write(resp.text)
+          print("\nFull page saved to artifact.")
           EOF
+
+      - name: Upload bracket HTML artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bracket-html-2024
+          path: diag/page_2024.html
+          retention-days: 7
 
       # Upload after each slow step so partial results are preserved
       # even if a later step fails.
