@@ -3,10 +3,10 @@ name: Run Freshman Reliance Pipeline
 on:
   workflow_dispatch:
     inputs:
-      from_step:
-        description: "Start from step (1-5). Skip earlier steps if their data is cached."
+      skip_step3:
+        description: "Skip step 3 (player class stats)? Set to 'true' if already cached."
         required: false
-        default: "1"
+        default: "false"
 
 jobs:
   pipeline:
@@ -26,53 +26,27 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Cache persists across runs on the same branch (unlike artifacts).
-      # Each step restores its own cache key before running, so re-runs
-      # automatically skip steps whose output is already cached.
+      # Steps 1 and 2 are fast (4 min + instant) — always run them.
 
-      - name: Restore step 1 cache (tournament results)
-        uses: actions/cache/restore@v4
-        with:
-          path: data/raw/tournament_results.csv
-          key: tournament-results-v1
+      - name: "Step 1: Scrape tournament results (~4 min)"
+        run: python run_pipeline.py --step 1
 
-      - name: Restore step 2 cache (efficiency ratings)
-        uses: actions/cache/restore@v4
-        with:
-          path: data/raw/efficiency_ratings.csv
-          key: efficiency-ratings-v1
+      - name: "Step 2: Load efficiency ratings (Barttorvik exports)"
+        run: python run_pipeline.py --step 2
+
+      # Step 3 takes ~2 hours. Restore from cache if available; skip if
+      # the user set skip_step3=true and the cache was found.
 
       - name: Restore step 3 cache (player class stats)
+        id: cache-step3
         uses: actions/cache/restore@v4
         with:
           path: data/raw/player_class_stats.csv
           key: player-class-stats-v1
 
-      - name: "Step 1: Scrape tournament results"
-        if: ${{ inputs.from_step <= '1' }}
-        run: python run_pipeline.py --step 1
-
-      - name: Save step 1 cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: data/raw/tournament_results.csv
-          key: tournament-results-v1
-
-      - name: "Step 2: Fetch efficiency ratings (sports-reference)"
-        if: ${{ inputs.from_step <= '2' }}
-        run: python run_pipeline.py --step 2
-
-      - name: Save step 2 cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: data/raw/efficiency_ratings.csv
-          key: efficiency-ratings-v1
-
       - name: "Step 3: Fetch player class stats (~2 hours)"
-        if: ${{ inputs.from_step <= '3' }}
-        run: python run_pipeline.py --step 3
+        if: ${{ inputs.skip_step3 != 'true' || steps.cache-step3.outputs.cache-hit != 'true' }}
+        run: python run_pipeline.py --step 3 --force
 
       - name: Save step 3 cache
         if: always()
