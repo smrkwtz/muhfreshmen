@@ -1,0 +1,17 @@
+# Scraped/generated data - large and reproducible
+data/raw/
+data/processed/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Figures are generated outputs - optionally commit them
+# analysis/figures/
+
+# OS
+.DS_Store
