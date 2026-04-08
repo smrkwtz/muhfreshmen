@@ -69,24 +69,25 @@ def compute_expected_margin(row: pd.Series) -> float | None:
     """
     Expected margin for team1 (the favored team) over team2 on a neutral court:
 
-        expected_margin = (adjEM_team1 - adjEM_team2) * avg_tempo / 100
+        expected_margin = (netRtg_team1 - netRtg_team2) * avg_pace / 100
 
-    avg_tempo is the mean of both teams' adjusted tempos.
-    Falls back to 70 possessions if tempo data is missing.
+    netRtg = ORtg - DRtg (efficiency margin per 100 possessions).
+    avg_pace is the mean of both teams' pace figures.
+    Falls back to 70 possessions if pace data is missing.
     """
-    em1 = row.get("adjEM_team1")
-    em2 = row.get("adjEM_team2")
+    em1 = row.get("netRtg_team1")
+    em2 = row.get("netRtg_team2")
     if pd.isna(em1) or pd.isna(em2):
         return None
 
-    t1 = row.get("adjT_team1")
-    t2 = row.get("adjT_team2")
-    if pd.notna(t1) and pd.notna(t2):
-        avg_tempo = (t1 + t2) / 2
+    p1 = row.get("Pace_team1")
+    p2 = row.get("Pace_team2")
+    if pd.notna(p1) and pd.notna(p2):
+        avg_pace = (p1 + p2) / 2
     else:
-        avg_tempo = 70.0
+        avg_pace = 70.0
 
-    return (em1 - em2) * avg_tempo / 100
+    return (em1 - em2) * avg_pace / 100
 
 
 # ---------------------------------------------------------------------------
@@ -112,18 +113,19 @@ def build_analysis_dataset(
     class_stats["team_norm"] = class_stats["team_name"].apply(normalise_name)
 
     # --- Join efficiency ratings ---
-    rat_cols = ["year", "team_norm", "adjEM", "adjO", "adjD", "adjT"]
+    rat_cols = ["year", "team_norm", "netRtg", "ORtg", "DRtg", "Pace"]
+    available_rat_cols = [c for c in rat_cols if c in ratings.columns or c in ("year", "team_norm")]
     games = games.merge(
-        ratings[rat_cols].rename(columns={c: f"{c}_team1" if c not in ("year", "team_norm") else c
-                                          for c in rat_cols}),
+        ratings[available_rat_cols].rename(columns={c: f"{c}_team1" if c not in ("year", "team_norm") else c
+                                          for c in available_rat_cols}),
         left_on=["year", "team1_norm"],
         right_on=["year", "team_norm"],
         how="left",
     ).drop(columns="team_norm")
 
     games = games.merge(
-        ratings[rat_cols].rename(columns={c: f"{c}_team2" if c not in ("year", "team_norm") else c
-                                          for c in rat_cols}),
+        ratings[available_rat_cols].rename(columns={c: f"{c}_team2" if c not in ("year", "team_norm") else c
+                                          for c in available_rat_cols}),
         left_on=["year", "team2_norm"],
         right_on=["year", "team_norm"],
         how="left",

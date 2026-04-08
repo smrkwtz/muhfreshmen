@@ -1,17 +1,21 @@
 """
-Collects pre-tournament adjusted efficiency ratings from Barttorvik (T-Rank).
+Collects pre-tournament team efficiency ratings from sports-reference.com.
 
-Barttorvik is a free site with ratings methodology nearly identical to KenPom.
-If you have a KenPom subscription, see the KenPom section at the bottom for
-how to swap in that data instead.
+Uses the Advanced School Stats page for each season, which has:
+  ORtg  - Offensive Rating (points scored per 100 possessions, raw)
+  DRtg  - Defensive Rating (points allowed per 100 possessions, raw)
+  Pace  - Possessions per 40 minutes
 
-Output columns (per team per year):
-  year, team, team_id_bart, adjEM, adjO, adjD, adjT
+These are unadjusted for opponent quality (unlike KenPom's AdjO/AdjD), but
+the same spread formula applies:
+  expected_margin = (netRtg_A - netRtg_B) * avg_pace / 100
 
-adjEM  = Adjusted Efficiency Margin (points per 100 possessions above average)
-adjO   = Adjusted Offensive Efficiency (points scored per 100 possessions)
-adjD   = Adjusted Defensive Efficiency (points allowed per 100 possessions)
-adjT   = Adjusted Tempo (possessions per 40 minutes)
+where netRtg = ORtg - DRtg.
+
+If you have a KenPom subscription, call load_kenpom_exports() instead --
+see the bottom of this file.
+
+Output columns: year, team, team_id, ORtg, DRtg, Pace, netRtg
 """
 
 import re
@@ -20,178 +24,138 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+from bs4 import BeautifulSoup, Comment
 
-from constants import TOURNAMENT_START_DATES, TOURNAMENT_YEARS
+from constants import TOURNAMENT_YEARS
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; research/academic project)"}
 REQUEST_DELAY = 4
 
 OUTPUT_PATH = Path("data/raw/efficiency_ratings.csv")
 
-# Barttorvik table column order (as of 2024 - may drift slightly)
-# The HTML table on the trank.php page has labelled <th> headers; we match by name.
-BART_COL_MAP = {
-    "team": "team",
-    "conf": "conf",
-    "adjoe": "adjO",     # Adjusted Offensive Efficiency
-    "adjde": "adjD",     # Adjusted Defensive Efficiency
-    "barthag": "barthag",
-    "efg%": "eFG_pct",
-    "adjt": "adjT",      # Adjusted Tempo
-}
+URL_TEMPLATES = [
+    "https://www.sports-reference.com/cbb/seasons/men/{year}-advanced-school-stats.html",
+    "https://www.sports-reference.com/cbb/seasons/{year}-advanced-school-stats.html",
+]
 
 
-def _build_barttorvik_url(year: int) -> str:
-    """
-    Build URL for Barttorvik team ratings through the day before the tournament.
-    Setting end= to the tournament start date excludes tournament games from
-    the rating calculation, giving us a clean pre-tournament snapshot.
-    """
-    end_date = TOURNAMENT_START_DATES.get(year)
-    if not end_date:
-        raise ValueError(f"No tournament start date defined for {year}")
-
-    # Season start: November 1 of the prior calendar year
-    season_start = f"{year - 1}1101"
-
-    params = (
-        f"year={year}"
-        f"&sort="
-        f"&lastx=0"
-        f"&hteam="
-        f"&t2value="
-        f"&conlimit=All"
-        f"&state=All"
-        f"&begin={season_start}"
-        f"&end={end_date}"
-        f"&top=0"
-        f"&link=y"
-        f"&q="
-        f"&busted=0"
-        f"&type=All"
-        f"&mingames=0"
-    )
-    return f"https://barttorvik.com/trank.php?{params}#"
+def _find_table(soup: BeautifulSoup, table_id: str) -> BeautifulSoup | None:
+    """Find a table in the DOM or inside HTML comments."""
+    table = soup.find("table", id=table_id)
+    if table:
+        return table
+    for comment in soup.find_all(string=lambda t: isinstance(t, Comment)):
+        if table_id in comment:
+            inner = BeautifulSoup(comment, "lxml")
+            table = inner.find("table", id=table_id)
+            if table:
+                return table
+    return None
 
 
-def _build_barttorvik_json_url(year: int) -> str:
-    """
-    Barttorvik loads its ratings table from a JSON endpoint, not from the
-    HTML of trank.php (which is JS-rendered). The getteams.php endpoint
-    accepts the same date-range parameters and returns a raw JavaScript array.
-    """
-    end_date = TOURNAMENT_START_DATES.get(year)
-    if not end_date:
-        raise ValueError(f"No tournament start date defined for {year}")
-    season_start = f"{year - 1}1101"
-    params = (
-        f"year={year}"
-        f"&conf=All"
-        f"&state=All"
-        f"&begin={season_start}"
-        f"&end={end_date}"
-        f"&top=0"
-        f"&type=All"
-        f"&links=y"
-        f"&sortby="
-        f"&mingames=0"
-    )
-    return f"https://barttorvik.com/getteams.php?{params}"
+def _parse_advanced_stats(soup: BeautifulSoup, year: int) -> list[dict]:
+    """Parse ORtg, DRtg, Pace from the advanced school stats table."""
+    # Table ids used across different years
+    for table_id in ("adv_school_stats", "advanced-school-stats", "adv_stats",
+                     "school_stats", "basic_school_stats"):
+        table = _find_table(soup, table_id)
+        if table:
+            break
 
+    if table is None:
+        # Last resort: largest table on the page
+        all_tables = soup.find_all("table")
+        # Also check inside all comments
+        for comment in soup.find_all(string=lambda t: isinstance(t, Comment)):
+            inner = BeautifulSoup(comment, "lxml")
+            all_tables.extend(inner.find_all("table"))
+        table = max(all_tables, key=lambda t: len(t.find_all("tr")), default=None)
 
-def _parse_barttorvik_json(data: list, year: int) -> list[dict]:
-    """
-    Parse the array returned by getteams.php.
-
-    Each element is an array. The known column layout (may shift slightly):
-      [0]  rank
-      [1]  team name
-      [2]  conference
-      [3]  adjOE rank
-      [4]  adjOE  ← Adjusted Offensive Efficiency
-      [5]  adjDE rank
-      [6]  adjDE  ← Adjusted Defensive Efficiency
-      [7]  barthag (Pythagorean win %)
-      [8]  record (string, e.g. "32-5")
-      [9]  adjT rank
-      [10] adjT   ← Adjusted Tempo
-      ...
-
-    We identify columns dynamically by scanning the first row for floats in
-    the expected ranges (adjOE ~100-130, adjDE ~85-115, adjT ~60-80), which
-    is more robust than relying on fixed indices.
-    """
-    if not data:
+    if table is None:
         return []
 
-    # Detect column positions from the first data row
-    first = data[0]
+    # Map data-stat → column index from the last header row
+    thead = table.find("thead")
+    if not thead:
+        return []
+    header_rows = thead.find_all("tr")
+    last_header = header_rows[-1]
+    headers = [th.get("data-stat", th.get_text(strip=True)).lower()
+               for th in last_header.find_all(["th", "td"])]
 
-    def find_col(lo, hi, exclude=()) -> int | None:
-        for i, v in enumerate(first):
-            if i in exclude:
-                continue
+    def col(*names):
+        for n in names:
             try:
-                f = float(v)
-                if lo <= f <= hi:
-                    return i
-            except (TypeError, ValueError):
+                return headers.index(n)
+            except ValueError:
                 pass
         return None
 
-    team_col = 1   # always position 1
-    adjo_col = find_col(85, 145)
-    adjd_col = find_col(85, 130, exclude={adjo_col} if adjo_col is not None else set())
-    adjt_col = find_col(55, 85,  exclude={adjo_col, adjd_col} - {None})
+    school_col = col("school_name", "school", "team")
+    ortg_col   = col("off_rtg", "o_rtg", "ortg", "adj_oe", "adjoe")
+    drtg_col   = col("def_rtg", "d_rtg", "drtg", "adj_de", "adjde")
+    pace_col   = col("pace", "adj_tempo", "adjt", "tempo")
+
+    if school_col is None or ortg_col is None or drtg_col is None:
+        print(f"  [warn] Could not find rating columns. Headers: {headers[:20]}")
+        return []
 
     rows = []
-    for entry in data:
+    for tr in table.find("tbody").find_all("tr"):
+        if "thead" in (tr.get("class") or []):
+            continue
+        cells = tr.find_all(["td", "th"])
+
+        def val(idx):
+            if idx is None or idx >= len(cells):
+                return None
+            return cells[idx].get_text(strip=True)
+
+        school_raw = val(school_col)
+        if not school_raw:
+            continue
+
+        # Extract school_id from link if available
+        school_a = cells[school_col].find("a") if school_col < len(cells) else None
+        school_id = None
+        if school_a:
+            m = re.search(r"/cbb/schools/([^/]+)/", school_a.get("href", ""))
+            if m:
+                school_id = m.group(1)
+
+        # Strip trailing * (NCAA tournament participant marker)
+        school = school_raw.rstrip("*").strip()
+
         try:
-            team = str(entry[team_col]).strip()
-            if not team:
-                continue
-            adjo = float(entry[adjo_col]) if adjo_col is not None else None
-            adjd = float(entry[adjd_col]) if adjd_col is not None else None
-            adjt = float(entry[adjt_col]) if adjt_col is not None else None
-            adjEM = round(adjo - adjd, 2) if (adjo and adjd) else None
-        except (IndexError, TypeError, ValueError):
+            ortg = float(val(ortg_col))
+            drtg = float(val(drtg_col))
+            pace = float(val(pace_col)) if pace_col is not None and val(pace_col) else None
+        except (TypeError, ValueError):
             continue
 
         rows.append({
             "year": year,
-            "team": team,
-            "adjO": adjo,
-            "adjD": adjd,
-            "adjT": adjt,
-            "adjEM": adjEM,
+            "team": school,
+            "team_id": school_id,
+            "ORtg": ortg,
+            "DRtg": drtg,
+            "Pace": pace,
+            "netRtg": round(ortg - drtg, 2),
         })
 
     return rows
 
 
 def fetch_ratings_for_year(year: int, session: requests.Session) -> list[dict]:
-    import json
-
-    url = _build_barttorvik_json_url(year)
-    resp = session.get(url, headers=HEADERS, timeout=30)
-    resp.raise_for_status()
-
-    # Response is either JSON or a JS array literal — strip any variable prefix
-    text = resp.text.strip()
-    if text.startswith("var ") or text.startswith("let ") or text.startswith("const "):
-        text = text.split("=", 1)[1].strip().rstrip(";")
-
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as e:
-        print(f"  [warn] JSON parse failed: {e}. First 200 chars: {text[:200]}")
-        return []
-
-    if not isinstance(data, list):
-        print(f"  [warn] Unexpected response type: {type(data)}")
-        return []
-
-    return _parse_barttorvik_json(data, year)
+    for template in URL_TEMPLATES:
+        url = template.format(year=year)
+        resp = session.get(url, headers=HEADERS, timeout=30, allow_redirects=True)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, "lxml")
+            rows = _parse_advanced_stats(soup, year)
+            if rows:
+                return rows
+    return []
 
 
 def collect_all_efficiency_ratings(
@@ -224,44 +188,38 @@ def collect_all_efficiency_ratings(
 # ---------------------------------------------------------------------------
 # KenPom alternative
 # ---------------------------------------------------------------------------
-# If you have a KenPom subscription, you can export data from
-#   https://kenpom.com/index.php  (use the "Export" button)
-# for each year and save the CSVs as  data/raw/kenpom_{year}.csv
-# Then call load_kenpom_exports() instead of collect_all_efficiency_ratings().
-#
-# KenPom CSV columns of interest:
-#   TeamName, AdjEM, AdjO, AdjD, AdjT (column names may vary slightly)
+# Export CSVs from https://kenpom.com for each year, save as
+# data/raw/kenpom_{year}.csv, then call load_kenpom_exports() in
+# build_dataset.py instead of collect_all_efficiency_ratings().
 
 def load_kenpom_exports(
     data_dir: Path = Path("data/raw"),
     years: list[int] = TOURNAMENT_YEARS,
 ) -> pd.DataFrame:
-    """Load pre-downloaded KenPom CSV exports and return a unified DataFrame."""
     frames = []
     for year in years:
         path = data_dir / f"kenpom_{year}.csv"
         if not path.exists():
-            print(f"  Missing {path} - skipping {year}")
+            print(f"  Missing {path}")
             continue
         df = pd.read_csv(path)
         df.columns = [c.strip() for c in df.columns]
-        # Normalise column names - KenPom export headers vary slightly
         rename = {}
         for col in df.columns:
             low = col.lower()
-            if "team" in low:
-                rename[col] = "team"
-            elif low in ("adjem", "adj. em", "adj em"):
-                rename[col] = "adjEM"
-            elif low in ("adjo", "adj. o", "adj. oe", "adjoe"):
-                rename[col] = "adjO"
-            elif low in ("adjd", "adj. d", "adj. de", "adjde"):
-                rename[col] = "adjD"
-            elif low in ("adjt", "adj. t", "adj. tempo"):
-                rename[col] = "adjT"
+            if "team" in low:                        rename[col] = "team"
+            elif low in ("adjem", "adj. em", "adj em"):  rename[col] = "netRtg"
+            elif low in ("adjo", "adj. o", "adjoe"):     rename[col] = "ORtg"
+            elif low in ("adjd", "adj. d", "adjde"):     rename[col] = "DRtg"
+            elif low in ("adjt", "adj. t"):              rename[col] = "Pace"
         df = df.rename(columns=rename)
         df["year"] = year
-        frames.append(df[["year", "team", "adjEM", "adjO", "adjD", "adjT"]])
+        for c in ("ORtg", "DRtg", "Pace", "netRtg"):
+            if c not in df.columns:
+                df[c] = None
+        if "netRtg" not in df.columns and "ORtg" in df.columns and "DRtg" in df.columns:
+            df["netRtg"] = df["ORtg"] - df["DRtg"]
+        frames.append(df[["year", "team", "ORtg", "DRtg", "Pace", "netRtg"]])
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 

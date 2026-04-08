@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       from_step:
-        description: "Start from step (1-5). Use to resume after a partial run."
+        description: "Start from step (1-5). Skip earlier steps if their data is cached."
         required: false
         default: "1"
 
@@ -26,63 +26,60 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Restore any previously uploaded artifacts so cached steps are skipped.
-      - name: Restore tournament results (if available)
-        uses: actions/download-artifact@v4
-        with:
-          name: tournament-results
-          path: data/raw/
-        continue-on-error: true
+      # Cache persists across runs on the same branch (unlike artifacts).
+      # Each step restores its own cache key before running, so re-runs
+      # automatically skip steps whose output is already cached.
 
-      - name: Restore efficiency ratings (if available)
-        uses: actions/download-artifact@v4
+      - name: Restore step 1 cache (tournament results)
+        uses: actions/cache/restore@v4
         with:
-          name: efficiency-ratings
-          path: data/raw/
-        continue-on-error: true
+          path: data/raw/tournament_results.csv
+          key: tournament-results-v1
 
-      - name: Restore player class stats (if available)
-        uses: actions/download-artifact@v4
+      - name: Restore step 2 cache (efficiency ratings)
+        uses: actions/cache/restore@v4
         with:
-          name: player-class-stats
-          path: data/raw/
-        continue-on-error: true
+          path: data/raw/efficiency_ratings.csv
+          key: efficiency-ratings-v1
+
+      - name: Restore step 3 cache (player class stats)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/raw/player_class_stats.csv
+          key: player-class-stats-v1
 
       - name: "Step 1: Scrape tournament results"
         if: ${{ inputs.from_step <= '1' }}
         run: python run_pipeline.py --step 1
 
-      - name: Upload tournament results
-        uses: actions/upload-artifact@v4
+      - name: Save step 1 cache
         if: always()
+        uses: actions/cache/save@v4
         with:
-          name: tournament-results
           path: data/raw/tournament_results.csv
-          overwrite: true
+          key: tournament-results-v1
 
-      - name: "Step 2: Fetch efficiency ratings (Barttorvik)"
+      - name: "Step 2: Fetch efficiency ratings (sports-reference)"
         if: ${{ inputs.from_step <= '2' }}
         run: python run_pipeline.py --step 2
 
-      - name: Upload efficiency ratings
-        uses: actions/upload-artifact@v4
+      - name: Save step 2 cache
         if: always()
+        uses: actions/cache/save@v4
         with:
-          name: efficiency-ratings
           path: data/raw/efficiency_ratings.csv
-          overwrite: true
+          key: efficiency-ratings-v1
 
       - name: "Step 3: Fetch player class stats (~2 hours)"
         if: ${{ inputs.from_step <= '3' }}
         run: python run_pipeline.py --step 3
 
-      - name: Upload player class stats
-        uses: actions/upload-artifact@v4
+      - name: Save step 3 cache
         if: always()
+        uses: actions/cache/save@v4
         with:
-          name: player-class-stats
           path: data/raw/player_class_stats.csv
-          overwrite: true
+          key: player-class-stats-v1
 
       - name: "Step 4: Build merged analysis dataset"
         run: python run_pipeline.py --step 4
@@ -96,6 +93,9 @@ jobs:
         with:
           name: results
           path: |
+            data/raw/tournament_results.csv
+            data/raw/efficiency_ratings.csv
+            data/raw/player_class_stats.csv
             data/processed/analysis_dataset.csv
             analysis/figures/
           overwrite: true
