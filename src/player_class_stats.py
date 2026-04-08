@@ -159,12 +159,19 @@ def fetch_team_stats(
     year: int,
     session: requests.Session,
 ) -> dict | None:
-    url = f"https://www.sports-reference.com/cbb/schools/{team_id}/{year}.html"
-    resp = session.get(url, headers=HEADERS, timeout=30)
-    if resp.status_code == 404:
-        return None
-    resp.raise_for_status()
-    return _parse_team_page(resp.text, year, team_id)
+    # Sports-reference added /men/ to school URLs; try new format first.
+    for url in [
+        f"https://www.sports-reference.com/cbb/schools/{team_id}/men/{year}.html",
+        f"https://www.sports-reference.com/cbb/schools/{team_id}/{year}.html",
+    ]:
+        resp = session.get(url, headers=HEADERS, timeout=30, allow_redirects=True)
+        if resp.status_code == 404:
+            continue
+        resp.raise_for_status()
+        result = _parse_team_page(resp.text, year, team_id)
+        if result:
+            return result
+    return None
 
 
 def collect_player_class_stats(
