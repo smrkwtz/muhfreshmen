@@ -104,32 +104,41 @@ def _parse_tourney_table(table: BeautifulSoup, year: int) -> list[dict]:
 
     Seeds appear in parentheses after team names, e.g. "Connecticut (1)".
     """
-    # Map header data-stat attributes → column indices
+    # Map header data-stat attributes → column indices.
+    # Sports-reference sometimes uses data-stat, sometimes plain <th> text.
     thead = table.find("thead")
     if not thead:
         return []
 
-    headers = [
-        th.get("data-stat", "").lower()
-        for th in thead.find_all(["th", "td"])
-    ]
+    # Use the last header row (some tables have a group row above real headers)
+    header_rows = thead.find_all("tr")
+    header_row = header_rows[-1] if header_rows else thead
+    headers = []
+    for th in header_row.find_all(["th", "td"]):
+        stat = th.get("data-stat", "").strip().lower()
+        if not stat:
+            stat = th.get_text(strip=True).lower()
+        headers.append(stat)
 
-    def col(stat: str) -> int | None:
-        try:
-            return headers.index(stat)
-        except ValueError:
-            return None
+    print(f"  [debug] headers: {headers}")
+    print(f"  [debug] first row: {str(table.find('tbody').find('tr'))[:300]}")
 
-    round_col  = col("round")
-    winner_col = col("winner") or col("school_name") or col("winner_school")
-    wpts_col   = col("pts_winner") or col("pts") or col("winner_pts")
-    loser_col  = col("loser") or col("loser_school")
-    lpts_col   = col("pts_loser") or col("loser_pts")
+    def col(*names: str) -> int | None:
+        for name in names:
+            try:
+                return headers.index(name)
+            except ValueError:
+                pass
+        return None
 
-    # Fallback: use positional indices if data-stat names differ
+    round_col  = col("round", "rnd")
+    winner_col = col("winner", "school_name", "winner_school", "team")
+    wpts_col   = col("pts_winner", "pts", "winner_pts", "w pts", "wpts")
+    loser_col  = col("loser", "loser_school", "opponent", "opp")
+    lpts_col   = col("pts_loser", "loser_pts", "l pts", "lpts", "opp pts")
+
     if winner_col is None or loser_col is None:
-        # Print headers to help diagnose
-        print(f"  [warn] Unexpected headers: {headers}")
+        print(f"  [warn] Could not map winner/loser columns. Headers: {headers}")
         return []
 
     games = []
