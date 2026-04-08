@@ -18,6 +18,8 @@ Outputs:
 
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")  # headless backend for CI / server environments
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
