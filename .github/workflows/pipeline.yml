@@ -64,7 +64,7 @@ jobs:
       # even if a later step fails.
 
       - name: "Step 1: Scrape tournament results"
-        run: DEBUG_SCRAPE=1 python run_pipeline.py --step 1
+        run: python run_pipeline.py --step 1
 
       - name: Upload tournament results
         uses: actions/upload-artifact@v4
