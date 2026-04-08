@@ -21,45 +21,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Dump the bracket div HTML so we can inspect the actual structure.
-      - name: "Diagnose: dump bracket div HTML"
-        run: |
-          python - <<'EOF'
-          import os, requests
-          from bs4 import BeautifulSoup, Comment
-
-          for url in [
-              "https://www.sports-reference.com/cbb/postseason/men/2024-ncaa.html",
-              "https://www.sports-reference.com/cbb/postseason/2024-ncaa.html",
-          ]:
-              resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
-              print(f"{url} -> {resp.status_code}")
-              if resp.status_code == 200:
-                  break
-
-          soup = BeautifulSoup(resp.text, "lxml")
-
-          bracket_divs = soup.find_all("div", id="bracket")
-          print(f"\nNumber of #bracket divs in DOM: {len(bracket_divs)}")
-          for i, div in enumerate(bracket_divs[:2]):
-              print(f"\n--- #bracket[{i}] first 2000 chars ---")
-              print(str(div)[:2000])
-
-          # Save full HTML as artifact for download + manual inspection
-          os.makedirs("diag", exist_ok=True)
-          with open("diag/page_2024.html", "w") as f:
-              f.write(resp.text)
-          print("\nFull page saved to artifact.")
-          EOF
-
-      - name: Upload bracket HTML artifact
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: bracket-html-2024
-          path: diag/page_2024.html
-          retention-days: 7
-
       # Upload after each slow step so partial results are preserved
       # even if a later step fails.
 
