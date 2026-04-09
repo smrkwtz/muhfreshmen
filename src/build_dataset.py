@@ -15,6 +15,7 @@ does being a highly-rated freshman-heavy team predict underperformance?
 Output: data/processed/analysis_dataset.csv
 """
 
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -46,13 +47,20 @@ SREF_TO_BART_NAME = {
     "Texas A&M-Corpus Christi": "TAMUCC",
     "Southeast Missouri St.": "SE Missouri State",
     "Detroit Mercy": "Detroit",
+    "ETSU": "East Tennessee St.",
 }
 
 
 def normalise_name(name: str) -> str:
     if not isinstance(name, str):
         return ""
-    return SREF_TO_BART_NAME.get(name, name).lower().strip()
+    mapped = SREF_TO_BART_NAME.get(name)
+    if mapped:
+        return mapped.lower().strip()
+    name = name.lower().strip()
+    # Barttorvik abbreviates "state" as "st." for most schools
+    name = re.sub(r'\bstate\b', 'st.', name)
+    return name
 
 
 # ---------------------------------------------------------------------------

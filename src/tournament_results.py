@@ -103,9 +103,18 @@ def _parse_bracket(bracket_div, round_names: list[str], year: int) -> list[dict]
     games = []
     round_divs = bracket_div.find_all("div", class_="round")
 
-    # If a regional bracket has 5 rounds, the extra first one is First Four
+    # If a regional bracket has 5 rounds, the extra div is either:
+    #   - a leading First Four div (older years): first div has ≤2 games
+    #   - a trailing placeholder div (newer format): first div has 8 games
     if len(round_divs) == len(round_names) + 1:
-        round_labels = [FIRST_FOUR] + round_names
+        first_div_game_count = sum(
+            1 for d in round_divs[0].find_all("div", recursive=False)
+            if len(d.find_all("div", recursive=False)) >= 2
+        )
+        if first_div_game_count <= 2:
+            round_labels = [FIRST_FOUR] + round_names  # leading First Four
+        else:
+            round_labels = round_names  # trailing placeholder, ignore 5th div
     else:
         round_labels = round_names
 
