@@ -104,9 +104,12 @@ def _parse_bracket(bracket_div, round_names: list[str], year: int) -> list[dict]
     round_divs = bracket_div.find_all("div", class_="round")
 
     # If a regional bracket has 5 rounds, the extra div is either:
-    #   - a leading First Four div (older years): teams share the same seed
-    #   - a trailing placeholder div (newer format): teams have different seeds
+    #   - a leading First Four div (older years): equal-seed play-in games
+    #   - a trailing placeholder div (newer format): no games or different seeds
     # Peek at the first parseable game in round_divs[0] to tell them apart.
+    # Note: equal seeds only means First Four here because we're in a regional
+    # bracket's first div — the First Round always pairs different seeds (1v16 etc.),
+    # and Final Four equal-seed matchups live in the national bracket, not here.
     if len(round_divs) == len(round_names) + 1:
         round_labels = round_names  # default: trailing placeholder
         for game_div in round_divs[0].find_all("div", recursive=False):
