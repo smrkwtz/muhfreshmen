@@ -54,6 +54,7 @@ SREF_TO_BART_NAME = {
     "Arkansas-Pine Bluff": "Arkansas Pine Bluff",
     "Texas A&M-Corpus Christi": "Texas A&M Corpus Chris",
     "Southern Illinois-Edwardsville": "SIU Edwardsville",
+    "SIU-Edwardsville": "SIU Edwardsville",
     "Southeast Missouri St.": "SE Missouri State",
     "Detroit Mercy": "Detroit",
     # State name / conference rebrands
