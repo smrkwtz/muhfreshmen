@@ -104,17 +104,25 @@ def _parse_bracket(bracket_div, round_names: list[str], year: int) -> list[dict]
     round_divs = bracket_div.find_all("div", class_="round")
 
     # If a regional bracket has 5 rounds, the extra div is either:
-    #   - a leading First Four div (older years): first div has ≤2 games
-    #   - a trailing placeholder div (newer format): first div has 8 games
+    #   - a leading First Four div (older years): teams share the same seed
+    #   - a trailing placeholder div (newer format): teams have different seeds
+    # Peek at the first parseable game in round_divs[0] to tell them apart.
     if len(round_divs) == len(round_names) + 1:
-        first_div_game_count = sum(
-            1 for d in round_divs[0].find_all("div", recursive=False)
-            if len(d.find_all("div", recursive=False)) >= 2
-        )
-        if first_div_game_count <= 2:
-            round_labels = [FIRST_FOUR] + round_names  # leading First Four
-        else:
-            round_labels = round_names  # trailing placeholder, ignore 5th div
+        round_labels = round_names  # default: trailing placeholder
+        for game_div in round_divs[0].find_all("div", recursive=False):
+            child_divs = game_div.find_all("div", recursive=False)
+            if len(child_divs) < 2:
+                continue
+            seeds = []
+            for td in child_divs[:2]:
+                span = td.find("span")
+                txt = span.get_text(strip=True) if span else ""
+                if txt.isdigit():
+                    seeds.append(int(txt))
+            if len(seeds) == 2:
+                if seeds[0] == seeds[1]:
+                    round_labels = [FIRST_FOUR] + round_names  # leading First Four
+                break  # first game is enough
     else:
         round_labels = round_names
 
