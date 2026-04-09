@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from tournament_results import collect_all_tournament_results, OUTPUT_PATH as RESULTS_PATH
 from efficiency_ratings import collect_all_efficiency_ratings, OUTPUT_PATH as RATINGS_PATH
 from player_class_stats import collect_player_class_stats, OUTPUT_PATH as CLASS_PATH
-from build_dataset import build_analysis_dataset, check_unmatched_teams
+from build_dataset import build_analysis_dataset
 
 ANALYSIS_PATH = Path("data/processed/analysis_dataset.csv")
 
@@ -62,8 +62,7 @@ def step4_build_dataset(force: bool = False) -> None:
         print(f"[Step 4] Skipping - {ANALYSIS_PATH} already exists (use --force to re-run)")
         return
     print("[Step 4] Building merged analysis dataset...")
-    df = build_analysis_dataset()
-    check_unmatched_teams(df)
+    build_analysis_dataset()
 
 
 def step5_analysis() -> None:
