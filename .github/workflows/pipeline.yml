@@ -95,7 +95,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: data/raw/player_class_stats.csv
-          key: player-class-stats-v1
+          key: player-class-stats-v2
 
       - name: "Step 3: Fetch player class stats (~2 hours)"
         if: |
@@ -109,7 +109,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: data/raw/player_class_stats.csv
-          key: player-class-stats-v1
+          key: player-class-stats-v2
 
       - name: "Step 4: Build merged analysis dataset"
         run: python run_pipeline.py --step 4
