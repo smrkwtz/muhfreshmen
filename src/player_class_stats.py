@@ -11,6 +11,7 @@ Output columns:
   fr_min_raw, fr_pts_raw, total_min, total_pts, n_fr_players
 """
 
+import re
 import time
 from pathlib import Path
 
@@ -29,6 +30,17 @@ OUTPUT_PATH = Path("data/raw/player_class_stats.csv")
 # Class labels used by sports-reference
 FRESHMAN_LABELS = {"fr", "freshman"}
 ALL_CLASS_LABELS = {"fr", "so", "jr", "sr", "freshman", "sophomore", "junior", "senior"}
+
+
+def _norm(name: str) -> str:
+    """Normalize a player name for matching across tables.
+    Removes Jr./Sr./II/III/IV suffixes, punctuation, and extra whitespace.
+    'Mikel Brown Jr.' and 'Mikel Brown' both become 'mikel brown'.
+    """
+    name = name.lower()
+    name = re.sub(r'\b(jr|sr|ii|iii|iv|v)\.?\b', '', name)
+    name = re.sub(r'[^a-z0-9\s]', '', name)  # strip punctuation / apostrophes / hyphens
+    return ' '.join(name.split())
 
 
 def _idx(headers: list[str], names: tuple) -> int | None:
@@ -93,7 +105,7 @@ def _parse_team_page(html: str, year: int, team_id: str) -> dict | None:
         if name_col is not None and cls_col is not None:
             for row in roster_tbl.find("tbody").find_all("tr"):
                 cells = row.find_all(["td", "th"])
-                name = _cell(cells, name_col).strip()
+                name = _norm(_cell(cells, name_col))
                 cls  = _cell(cells, cls_col).lower().strip()
                 if name and cls:
                     class_map[name] = cls
@@ -134,10 +146,21 @@ def _parse_team_page(html: str, year: int, team_id: str) -> dict | None:
         if s_cls is not None:
             cls = _cell(cells, s_cls).lower().strip()
         else:
-            player_name = _cell(cells, s_name).strip() if s_name is not None else ""
+            player_name = _norm(_cell(cells, s_name)) if s_name is not None else ""
             cls = class_map.get(player_name, "").lower().strip()
 
         if not cls or cls not in ALL_CLASS_LABELS:
+            # Warn if an active player can't be class-matched — indicates a name
+            # mismatch between roster and per-game tables.
+            if not cls and s_name is not None:
+                raw_name = _cell(cells, s_name)
+                try:
+                    g_check = float(_cell(cells, s_games) or 0)
+                    mp_check = float(_cell(cells, s_mp) or 0)
+                except ValueError:
+                    g_check = mp_check = 0
+                if g_check >= 5 and mp_check >= 5:
+                    print(f"    [warn] unmatched player '{raw_name}' ({g_check}g, {mp_check}mpg) — name mismatch?")
             continue
 
         try:
