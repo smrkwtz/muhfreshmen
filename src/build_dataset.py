@@ -31,23 +31,43 @@ OUTPUT_PATH = Path("data/processed/analysis_dataset.csv")
 # ---------------------------------------------------------------------------
 
 SREF_TO_BART_NAME = {
+    # Abbreviations / acronyms sref uses that differ from Barttorvik
     "Connecticut": "UConn",
-    "Miami (FL)": "Miami FL",
-    "UNC Asheville": "NC Asheville",
     "USC": "Southern California",
     "UCSB": "UC Santa Barbara",
     "UTSA": "UT San Antonio",
     "UTEP": "Texas-El Paso",
+    "ETSU": "East Tennessee St.",
+    "LIU": "LIU Brooklyn",
+    "Army": "Army West Point",
+    # Parenthetical disambiguators: sref appends "(State)" but Barttorvik varies
+    "Miami (FL)": "Miami FL",
+    "Miami (OH)": "Miami OH",
+    "Loyola (MD)": "Loyola MD",
+    "Albany (NY)": "Albany",
+    "Queens (NC)": "Queens",
+    "St. John's (NY)": "St. John's",
+    # Name shortening or hyphen/space differences
+    "UNC Asheville": "NC Asheville",
+    "College of Charleston": "Charleston",
+    "Gardner-Webb": "Gardner Webb",
+    "Arkansas-Pine Bluff": "Arkansas Pine Bluff",
+    "Texas A&M-Corpus Christi": "Texas A&M Corpus Chris",
+    "Southern Illinois-Edwardsville": "SIU Edwardsville",
+    "Southeast Missouri St.": "SE Missouri State",
+    "Detroit Mercy": "Detroit",
+    # State name / conference rebrands
     "Louisiana": "Louisiana Lafayette",
     "Louisiana-Lafayette": "Louisiana Lafayette",
     "Saint Mary's (CA)": "Saint Mary's",
-    "Loyola Chicago": "Loyola-Chicago",
-    "Army": "Army West Point",
-    "LIU": "LIU Brooklyn",
-    "Texas A&M-Corpus Christi": "TAMUCC",
-    "Southeast Missouri St.": "SE Missouri State",
-    "Detroit Mercy": "Detroit",
-    "ETSU": "East Tennessee St.",
+    # Teams sref may display without 'State' suffix
+    "Grambling": "Grambling St.",
+    "Sam Houston": "Sam Houston St.",
+    "Omaha": "Nebraska Omaha",       # old sref name before Nebraska-Omaha rebrand
+    # Alternative formats sref uses in some years
+    "NC State": "N.C. State",
+    "Ole Miss": "Mississippi",
+    "California Baptist": "Cal Baptist",
 }
 
 
@@ -153,12 +173,11 @@ def build_analysis_dataset(
     ratings  = pd.read_csv(ratings_path)
     class_stats = pd.read_csv(class_path)
 
-    games["team1_norm"]       = games["team1"].apply(normalise_name)
-    games["team2_norm"]       = games["team2"].apply(normalise_name)
-    ratings["team_norm"]      = ratings["team"].apply(normalise_name)
-    class_stats["team_norm"]  = class_stats["team_name"].apply(normalise_name)
+    games["team1_norm"]  = games["team1"].apply(normalise_name)
+    games["team2_norm"]  = games["team2"].apply(normalise_name)
+    ratings["team_norm"] = ratings["team"].apply(normalise_name)
 
-    # Join efficiency ratings (team1 and team2)
+    # Join efficiency ratings (team1 and team2) — matched on normalised team name
     rat_cols = [c for c in ["year", "team_norm", "netRtg", "ORtg", "DRtg", "Pace"]
                 if c in ratings.columns or c in ("year", "team_norm")]
     for side in ("team1", "team2"):
@@ -171,17 +190,19 @@ def build_analysis_dataset(
             how="left",
         ).drop(columns="team_norm")
 
-    # Join freshman stats (team1 and team2)
-    fr_cols = ["year", "team_norm", "fr_min_share", "fr_pts_share"]
+    # Join freshman stats (team1 and team2) — matched on team_id, which is
+    # consistent between tournament_results and player_class_stats (both come
+    # from the same sports-reference URL slug).
+    fr_cols = ["year", "team_id", "fr_min_share", "fr_pts_share"]
     for side in ("team1", "team2"):
         games = games.merge(
             class_stats[fr_cols].rename(columns={
-                c: f"{c}_{side}" for c in fr_cols if c not in ("year", "team_norm")
+                c: f"{c}_{side}" for c in fr_cols if c not in ("year", "team_id")
             }),
-            left_on=["year", f"{side}_norm"],
-            right_on=["year", "team_norm"],
+            left_on=["year", f"{side}_id"],
+            right_on=["year", "team_id"],
             how="left",
-        ).drop(columns="team_norm")
+        ).drop(columns="team_id")
 
     # Compute spreads
     games["expected_margin"] = games.apply(compute_expected_margin, axis=1)
