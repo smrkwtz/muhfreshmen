@@ -64,21 +64,29 @@ SREF_TO_BART_NAME = {
     "Grambling": "Grambling St.",
     "Sam Houston": "Sam Houston St.",
     "Omaha": "Nebraska Omaha",       # old sref name before Nebraska-Omaha rebrand
-    # Alternative formats sref uses in some years
+    # Alternative formats / abbreviations sref uses in some years
     "NC State": "N.C. State",
+    "North Carolina State": "N.C. State",
     "Ole Miss": "Mississippi",
     "California Baptist": "Cal Baptist",
+    # Short names sref uses in brackets that differ from Barttorvik full names
+    "Pitt": "Pittsburgh",
+    "UNC": "North Carolina",
+    "UMass": "Massachusetts",
+    "FDU": "Fairleigh Dickinson",
+    "Loyola (IL)": "Loyola Chicago",
+    "McNeese": "McNeese St.",
 }
 
 
 def normalise_name(name: str) -> str:
     if not isinstance(name, str):
         return ""
-    mapped = SREF_TO_BART_NAME.get(name)
-    if mapped:
-        return mapped.lower().strip()
+    # Apply any explicit sref→Barttorvik remapping first
+    name = SREF_TO_BART_NAME.get(name, name)
     name = name.lower().strip()
-    # Barttorvik abbreviates "state" as "st." for most schools
+    # Barttorvik abbreviates "state" as "st." — apply after the dict lookup
+    # so that dict values containing "State" (e.g. "N.C. State") are also normalised
     name = re.sub(r'\bstate\b', 'st.', name)
     return name
 
